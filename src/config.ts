@@ -7,6 +7,7 @@ const CONFIG_PATH = path.join(os.homedir(), '.enzocli.json');
 export interface EnzoConfig {
     nvidiaApiKey?: string;
     defaultModel?: string;
+    autoRunTools?: boolean;
 }
 
 export const DEFAULT_MODEL = 'mistralai/devstral-2-123b-instruct-2512';
@@ -18,7 +19,6 @@ export function readConfig(): EnzoConfig {
             return JSON.parse(data);
         }
     } catch (error) {
-        // Return empty if there's an error parsing
     }
     return {};
 }

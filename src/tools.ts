@@ -1,9 +1,22 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import fs from 'fs/promises';
-import { resolve } from 'path';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import * as p from '@clack/prompts';
+import chalk from 'chalk';
+import { readConfig } from './config.js';
 
 const execAsync = promisify(exec);
+
+const allowed_path = process.cwd();
+
+function resolveSafe(filePath: string): string {
+    const resolvedPath = path.resolve(allowed_path, filePath);
+    if (!resolvedPath.startsWith(allowed_path)) {
+        throw new Error('Access denied: Path is outside the allowed directory.');
+    }
+    return resolvedPath;
+}
 
 export const TOOLS = [
     {
@@ -19,9 +32,7 @@ export const TOOLS = [
                         "description": "The command to execute"
                     }
                 },
-                "required": [
-                    "command"
-                ],
+                "required": ["command"],
                 "additionalProperties": false
             }
         }
@@ -30,7 +41,7 @@ export const TOOLS = [
         "type": "function",
         "function": {
             "name": "Read",
-            "description": "Reads a file from the local filesystem.",
+            "description": "Reads a file from the local filesystem. Always prefer this over Bash for reading files.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -39,9 +50,7 @@ export const TOOLS = [
                         "description": "The absolute path to the file to read"
                     }
                 },
-                "required": [
-                    "file_path"
-                ],
+                "required": ["file_path"],
                 "additionalProperties": false
             }
         }
@@ -63,10 +72,7 @@ export const TOOLS = [
                         "description": "The content to write to the file"
                     }
                 },
-                "required": [
-                    "file_path",
-                    "content"
-                ],
+                "required": ["file_path", "content"],
                 "additionalProperties": false
             }
         }
@@ -75,7 +81,7 @@ export const TOOLS = [
         "type": "function",
         "function": {
             "name": "LS",
-            "description": "Lists files and directories in a given path.",
+            "description": "Lists files and directories in a given path. Always prefer this over Bash for listing directories.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -84,9 +90,25 @@ export const TOOLS = [
                         "description": "The abstract path to the directory to list"
                     }
                 },
-                "required": [
-                    "path"
-                ],
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "WebFetch",
+            "description": "Fetches the content of a URL and returns it as text. Use this to read web pages, documentation, CVEs, GitHub repos, API references, or any external URL provided by the user. Always use this when the user provides a URL or asks about external resources.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL to fetch"
+                    }
+                },
+                "required": ["url"],
                 "additionalProperties": false
             }
         }
@@ -94,23 +116,90 @@ export const TOOLS = [
 ];
 
 export async function executeTool(name: string, args: any): Promise<string> {
-    try {
-        if (name === 'Bash') {
-            const { stdout, stderr } = await execAsync(args.command, { cwd: process.cwd() });
-            return stdout || stderr || 'Command executed successfully with no output.';
-        } else if (name === 'Read') {
-            const content = await fs.readFile(resolve(args.file_path), 'utf8');
-            return content;
-        } else if (name === 'Write') {
-            await fs.writeFile(resolve(args.file_path), args.content, 'utf8');
-            return 'File written successfully.';
-        } else if (name === 'LS') {
-            const files = await fs.readdir(resolve(args.path));
-            return files.join('\\n');
-        } else {
-            return `Error: Tool ${name} not found or not implemented.`;
+    switch (name) {
+        case 'Bash': {
+            const command = args['command'] ?? '';
+            const config = readConfig();
+
+            if (!config.autoRunTools) {
+                const confirmed = await p.confirm({
+                    message: `Allow Enzo to run: ${chalk.yellow(command)}`,
+                    initialValue: false,
+                });
+                if (p.isCancel(confirmed) || !confirmed) {
+                    return 'User declined to run the command.';
+                }
+            }
+
+            try {
+                const { stdout, stderr } = await execAsync(command, {
+                    cwd: allowed_path,
+                    timeout: 30_000,
+                });
+                return stdout || stderr || '(no output)';
+            } catch (e: unknown) {
+                const err = e as NodeJS.ErrnoException & { stderr?: string };
+                return `Error: ${err.message}\n${err.stderr ?? ''}`;
+            }
         }
-    } catch (e: any) {
-        return `Error executing tool ${name}: ${e.message}`;
+        case 'Read': {
+            const filePath = args['file_path'] ?? '';
+            try {
+                const safe = resolveSafe(filePath);
+                return await fs.readFile(safe, 'utf-8');
+            } catch (e: unknown) {
+                return `Error reading file: ${(e as Error).message}`;
+            }
+        }
+        case 'Write': {
+            const filePath = args['file_path'] ?? '';
+            const content = args['content'] ?? '';
+            try {
+                const safe = resolveSafe(filePath);
+                await fs.mkdir(path.dirname(safe), { recursive: true });
+                await fs.writeFile(safe, content, 'utf-8');
+                return `Successfully wrote to ${filePath}`;
+            } catch (e: unknown) {
+                return `Error writing file: ${(e as Error).message}`;
+            }
+        }
+        case 'LS': {
+            const dirPath = args['path'] ?? '.';
+            try {
+                const safe = resolveSafe(dirPath);
+                const entries = await fs.readdir(safe, { withFileTypes: true });
+                return entries
+                    .map((e) => (e.isDirectory() ? `[DIR] ${e.name}` : e.name))
+                    .join('\n');
+            } catch (e: unknown) {
+                return `Error listing directory: ${(e as Error).message}`;
+            }
+        }
+        case 'WebFetch': {
+            const url = args['url'] ?? '';
+            try {
+                const res = await fetch(url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (compatible; EnzoCLI/1.0)',
+                        'Accept': 'text/html,application/xhtml+xml,application/json,text/plain,*/*'
+                    }
+                });
+                if (!res.ok) return `Error: HTTP ${res.status} ${res.statusText}`;
+                const contentType = res.headers.get('content-type') ?? '';
+                const text = await res.text();
+                const cleaned = contentType.includes('html')
+                    ? text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                          .replace(/<[^>]+>/g, ' ')
+                          .replace(/\s{2,}/g, ' ')
+                          .trim()
+                    : text;
+                return cleaned.slice(0, 24000);
+            } catch (e: unknown) {
+                return `Error fetching URL: ${(e as Error).message}`;
+            }
+        }
+        default:
+            return `Unknown tool: ${name}`;
     }
 }

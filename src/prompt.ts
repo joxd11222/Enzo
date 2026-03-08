@@ -97,4 +97,6 @@ IMPORTANT: Always use the TodoWrite tool to plan and track tasks throughout the 
 # Code References
 
 When referencing specific functions or pieces of code include the pattern \`file_path:line_number\` to allow the user to easily navigate to the source code location.
+
+IMPORTANT: To read files use the Read tool, never Bash. To list directories use the LS tool, never Bash.
 `;
